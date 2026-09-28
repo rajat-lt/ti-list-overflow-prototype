@@ -1,0 +1,4 @@
+.DS_Store
+node_modules/
+# Internal brief; the repo is public, the brief stays local.
+PROTOTYPE_BRIEF.md
