@@ -2,3 +2,5 @@
 node_modules/
 # Internal brief; the repo is public, the brief stays local.
 PROTOTYPE_BRIEF.md
+# Local preview config for Claude Code; not part of the prototype.
+.claude/
