@@ -1,0 +1,523 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TI list row overflow fix</title>
+<style>
+  /* Tokens. Values from design-context data/tokens.json (light scheme); brief section 9 only where the theme has no entry. */
+  :root {
+    --fg-default: #1f2328; --fg-muted: #59636e; --fg-subtle: #6e7781; --fg-disabled: #8c959f; --fg-on-emphasis: #ffffff;
+    --border-default: #d1d9e0; --border-muted: #d0d7deb2;
+    --canvas-default: #ffffff; --canvas-subtle: #f6f8fa; --canvas-inset: #f6f8fa; --bg-selected: #818b9826;
+    --accent-fg: #0969da; --accent-subtle: #ddf4ff;
+    --success-fg: #1a7f37; --success-emphasis: #1f883d;
+    --danger-fg: #d1242f; --attention-fg: #9a6700; --attention-subtle: #fff8c5; --done-fg: #8250df;
+    --btn-bg: #f6f8fa; --btn-border: rgba(31,35,40,.15); --btn-hover-bg: #eff2f5;
+    --shadow-floating-small: 0 6px 18px 0 rgba(66,74,83,.12), 0 6px 12px -3px rgba(66,74,83,.04), 0 0 0 1px rgba(208,215,222,.5);
+    --tooltip-bg: #24292f; --radius: 6px;
+    --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body { font-family: var(--font); font-size: 14px; line-height: 20px; color: var(--fg-default); background: #eff2f5; }
+  svg.lucide { display: inline-block; vertical-align: middle; flex: 0 0 auto; }
+
+  /* ---------- Demo control bar (not part of the prototype UI) ---------- */
+  .controls { position: fixed; top: 0; left: 0; right: 0; z-index: 50; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px;
+    padding: 8px 16px; background: #24292f; color: #fff; font-size: 12px; line-height: 16px; }
+  .controls .ctl { display: inline-flex; align-items: center; gap: 6px; }
+  .controls .ctl-label { color: #8c959f; }
+  .controls .divider { width: 1px; height: 20px; background: rgba(255,255,255,.2); }
+  .seg { display: inline-flex; border: 1px solid rgba(255,255,255,.3); border-radius: var(--radius); overflow: hidden; }
+  .seg button { background: transparent; color: #fff; border: 0; padding: 4px 10px; font: inherit; cursor: pointer; }
+  .seg button + button { border-left: 1px solid rgba(255,255,255,.3); }
+  .seg button[aria-pressed="true"] { background: #fff; color: #24292f; }
+  .switch { position: relative; width: 32px; height: 18px; border: 0; border-radius: 9px; background: rgba(255,255,255,.3); cursor: pointer; padding: 0; }
+  .switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff; transition: left .15s; }
+  .switch[aria-checked="true"] { background: var(--success-emphasis); }
+  .switch[aria-checked="true"]::after { left: 16px; }
+  .pill { padding: 2px 10px; border-radius: 100px; font-weight: 600; }
+  .pill.pass { background: var(--success-emphasis); color: #fff; }
+  .pill.fail { background: var(--danger-fg); color: #fff; }
+
+  /* ---------- Simulated screen ---------- */
+  /* Outline, not border: the wrapper must be exactly 1280 or 1512 px of layout, so the edge line cannot take 2 px from it. */
+  .screen { display: flex; align-items: stretch; margin: 16px auto 48px; background: var(--canvas-default); outline: 1px solid var(--border-default); min-height: 720px; }
+  .sidebar-spacer { flex: 0 0 56px; background: var(--canvas-subtle); border-right: 1px solid var(--border-default); }
+  .page-margin { flex: 0 0 24px; }
+  .folder-panel { flex: 0 0 276px; margin: 16px 12px 16px 0; padding: 12px; background: var(--canvas-subtle); border: 1px solid var(--border-default); border-radius: var(--radius); color: var(--fg-muted); font-size: 12px; line-height: 18px; }
+  .folder-panel h2 { margin: 0 0 8px; font-size: 12px; line-height: 18px; font-weight: 600; color: var(--fg-default); }
+  .folder-closed .folder-panel { display: none; }
+  .right-area { flex: 1 1 auto; min-width: 0; padding: 16px 24px 24px; }
+
+  /* List. No side borders or padding on the list itself, so its clientWidth is the list content width the brief measures. */
+  .list-header { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 16px; border-top: 1px solid var(--border-default); border-bottom: 1px solid var(--border-default); font-weight: 600; }
+  .list-header input { margin: 0; }
+  .ti-list { background: var(--canvas-default); }
+  .view-current .ti-list { overflow-x: auto; }
+
+  .ti-row { position: relative; display: flex; align-items: flex-start; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--border-default); }
+  .ti-row:hover, .ti-row:focus-within, .pin-hover .ti-row { background: var(--canvas-subtle); }
+  .ti-row.is-selected { background: var(--bg-selected); }
+  input[type="checkbox"] { width: 16px; height: 16px; margin: 0; accent-color: var(--accent-fg); cursor: pointer; }
+  .row-check { flex: 0 0 16px; display: flex; align-items: center; height: 32px; }
+  .lead-status { flex: 0 0 20px; display: flex; align-items: center; justify-content: center; height: 32px; }
+  .lead-status svg { width: 20px; height: 20px; }
+
+  /* Title block: the flexible item. The two rules that stop unbroken strings from forcing overflow. */
+  .title-block { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; padding-top: 6px; }
+  .title { font-weight: 600; font-size: 14px; line-height: 20px; overflow-wrap: anywhere;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .view-current .title-block { min-width: auto; }
+  .view-current .title { overflow-wrap: normal; }
+  /* Hover-revealed bug actions sit on the meta line, under the execute column. A 1-line title leaves no room below a 32 px
+     control, so the title block reserves 61 px (32 control + 4 gap + 7 overhang + 18 meta) in that mode. Never changes on hover. */
+  .view-proposed.bug-hover .title-block { min-height: 61px; }
+  .tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+  .tag { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; border: 1px solid var(--border-default); border-radius: 100px; font-size: 12px; line-height: 18px; color: var(--fg-default); }
+  /* contain: inline-size keeps the meta line from dictating row width in either view, so the Current view's overflow comes from
+     the title's unbreakable string (the failure under test), not from this line. */
+  .meta { display: flex; align-items: center; gap: 4px; margin-top: auto; padding-top: 2px; font-size: 12px; line-height: 18px; color: var(--fg-muted); white-space: nowrap; min-width: 0; overflow: hidden; contain: inline-size; }
+  .meta svg { width: 14px; height: 14px; }
+  .meta .sep { margin: 0 2px; }
+  .link-attention { display: inline-flex; align-items: center; gap: 4px; padding: 0; background: none; border: 0; font: inherit; color: var(--attention-fg); cursor: pointer; }
+  .link-attention:hover { text-decoration: underline; }
+  .link-attention:focus-visible { outline: 2px solid var(--accent-fg); outline-offset: 2px; border-radius: 2px; }
+
+  /* Right group: fixed-width columns in the proposed view, natural width in the current view. */
+  .col { flex: 0 0 auto; }
+  .col-assignee { width: 150px; }
+  .col-status { width: 130px; }
+  .icon-only .col-status { width: 48px; }
+  .col-execute { width: 32px; }
+  .col-bug { width: 60px; }
+  .view-current .col-assignee, .view-current .col-status { width: auto; }
+
+  /* 4 px padding and gaps: inside the 130 px status column that leaves 76 px for the label, which fits every built-in
+     label ("Not Started" needs 75 px); custom labels ellipsize with a tooltip. Icon-only mode is then exactly 48 px. */
+  .picker { display: inline-flex; align-items: center; gap: 4px; width: 100%; height: 32px; padding: 0 4px; background: transparent; border: 1px solid transparent; border-radius: var(--radius);
+    font: inherit; color: var(--fg-default); text-align: left; white-space: nowrap; cursor: pointer; }
+  .picker:hover { background: var(--btn-hover-bg); border-color: var(--btn-border); }
+  .picker:focus-visible { outline: 2px solid var(--accent-fg); outline-offset: -2px; }
+  .picker .txt { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .picker .txt.muted { color: var(--fg-muted); }
+  .picker .ico { width: 16px; height: 16px; color: var(--fg-muted); }
+  .picker .status-ico { width: 20px; height: 20px; }
+  .picker .caret { width: 16px; height: 16px; margin-left: auto; color: var(--fg-muted); }
+  .icon-only .picker .status-ico + .caret { margin-left: 0; }
+  .view-current .picker { width: auto; }
+  .view-current .picker .txt { overflow: visible; text-overflow: clip; }
+  .avatar { flex: 0 0 20px; width: 20px; height: 20px; border-radius: 50%; background: var(--accent-subtle); color: var(--fg-default); font-size: 10px; line-height: 20px; font-weight: 600; text-align: center; }
+
+  .icon-btn { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0;
+    background: var(--btn-bg); border: 1px solid var(--btn-border); border-radius: var(--radius); color: var(--fg-default); cursor: pointer; }
+  .icon-btn svg { width: 16px; height: 16px; }
+  .icon-btn:hover { background: var(--btn-hover-bg); }
+  .icon-btn:focus-visible { outline: 2px solid var(--accent-fg); outline-offset: 2px; }
+  .icon-btn.primary { background: var(--success-emphasis); color: var(--fg-on-emphasis); }
+  .icon-btn.primary:hover { background: var(--success-fg); }
+  .icon-btn[aria-disabled="true"] { color: var(--fg-disabled); background: var(--btn-bg); cursor: not-allowed; }
+  .icon-btn[aria-disabled="true"]:hover { background: var(--btn-bg); }
+  .badge { position: absolute; top: -6px; right: -6px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 100px; background: var(--fg-default); color: #fff; font-size: 10px; line-height: 16px; font-weight: 600; text-align: center; }
+  .split { display: inline-flex; }
+  .split .icon-btn:first-child { border-radius: var(--radius) 0 0 var(--radius); }
+  .split .caret-btn { width: 28px; border-left: 0; border-radius: 0 var(--radius) var(--radius) 0; }
+  .split .caret-btn svg { width: 14px; height: 14px; }
+  .bug-actions.floating { position: absolute; right: 16px; bottom: 5px; visibility: hidden; opacity: 0; transition: opacity .12s; }
+  .ti-row:hover .bug-actions.floating, .ti-row:focus-within .bug-actions.floating, .pin-hover .bug-actions.floating { visibility: visible; opacity: 1; }
+
+  .color-success { color: var(--success-fg); }
+  .color-danger { color: var(--danger-fg); }
+  .color-accent { color: var(--accent-fg); }
+  .color-attention { color: var(--attention-fg); }
+  .color-done { color: var(--done-fg); }
+  .color-muted { color: var(--fg-muted); }
+
+  /* ---------- Overlays ---------- */
+  .menu { position: fixed; z-index: 60; min-width: 200px; max-width: 380px; padding: 4px; background: var(--canvas-default); border-radius: var(--radius); box-shadow: var(--shadow-floating-small); }
+  .menu button { display: flex; align-items: center; gap: 8px; width: 100%; height: 32px; padding: 0 8px; background: none; border: 0; border-radius: 4px; font: inherit; color: var(--fg-default); text-align: left; white-space: nowrap; cursor: pointer; }
+  .menu button:hover, .menu button:focus-visible { background: var(--canvas-subtle); outline: none; }
+  .menu .lbl { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .menu .status-ico { width: 16px; height: 16px; }
+  .menu .check { width: 16px; height: 16px; color: var(--fg-muted); }
+  .menu .group-title { padding: 6px 8px 2px; font-size: 12px; line-height: 16px; font-weight: 600; color: var(--fg-muted); }
+  .tooltip { position: fixed; z-index: 70; max-width: 280px; padding: 4px 8px; background: var(--tooltip-bg); color: #fff; font-size: 12px; line-height: 16px; border-radius: var(--radius); pointer-events: none; visibility: hidden; opacity: 0; transition: opacity .1s; }
+  .tooltip.show { visibility: visible; opacity: 1; }
+  .toasts { position: fixed; right: 16px; z-index: 80; display: flex; flex-direction: column; gap: 8px; }
+  .toast { padding: 8px 12px; background: var(--tooltip-bg); color: #fff; border-radius: var(--radius); box-shadow: var(--shadow-floating-small); }
+</style>
+</head>
+<body class="view-proposed bug-hover">
+
+<div class="controls" id="controls" aria-label="Prototype controls">
+  <span class="ctl"><span class="ctl-label">View</span>
+    <span class="seg" role="group" aria-label="View"><button data-ctl="view" data-val="current">Current</button><button data-ctl="view" data-val="proposed">Proposed</button></span></span>
+  <span class="ctl"><span class="ctl-label">Screen width</span>
+    <span class="seg" role="group" aria-label="Screen width"><button data-ctl="width" data-val="1280">1280</button><button data-ctl="width" data-val="1512">1512</button></span></span>
+  <span class="ctl"><span class="ctl-label">Folder panel</span>
+    <button class="switch" role="switch" data-switch="folderOpen" aria-label="Folder panel open"></button><span id="folder-state"></span></span>
+  <span class="divider"></span>
+  <span class="ctl"><span class="ctl-label">Status label</span>
+    <span class="seg" role="group" aria-label="Status label"><button data-ctl="statusLabel" data-val="label">Icon + label</button><button data-ctl="statusLabel" data-val="icon">Icon only</button></span></span>
+  <span class="ctl"><span class="ctl-label">Assignee avatar</span>
+    <span class="seg" role="group" aria-label="Assignee avatar"><button data-ctl="avatar" data-val="false">Hidden</button><button data-ctl="avatar" data-val="true">Shown</button></span></span>
+  <span class="ctl"><span class="ctl-label">Bug actions</span>
+    <span class="seg" role="group" aria-label="Bug actions"><button data-ctl="bugMode" data-val="hover">Hover, second line</button><button data-ctl="bugMode" data-val="first">Always visible, first line</button></span></span>
+  <span class="divider"></span>
+  <span class="ctl"><span class="ctl-label">Pin hover state</span>
+    <button class="switch" role="switch" data-switch="pinHover" aria-label="Pin hover state"></button></span>
+  <span class="ctl"><span class="ctl-label">Overflow check</span> <span class="pill" id="check-pill" title="">…</span></span>
+</div>
+
+<div class="screen" id="screen">
+  <div class="sidebar-spacer" aria-hidden="true"></div>
+  <div class="page-margin" aria-hidden="true"></div>
+  <aside class="folder-panel" aria-label="Folder panel placeholder">
+    <h2>Folders</h2>
+    Placeholder. Reserves the 288 px the real folder panel takes (276 px plus its 12 px right margin).
+  </aside>
+  <main class="right-area">
+    <div class="list-header">
+      <input type="checkbox" id="select-all" aria-label="Select all instances">
+      <span id="count-label">35 instances</span>
+    </div>
+    <div class="ti-list" id="list"></div>
+  </main>
+</div>
+
+<div class="tooltip" id="tooltip" role="tooltip"></div>
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<script src="https://unpkg.com/lucide@latest"></script>
+<script>
+/* =====================================================================
+   DATA. Edit values here; nothing below depends on the markup.
+   ===================================================================== */
+
+// Layout constants from the brief (section 3). listContentWidth = screen - sidebar - pageMargin - folderPanel - folderGap - 2 * rightMargin.
+const LAYOUT = { sidebar: 56, pageMargin: 24, folderPanel: 276, folderGap: 12, rightMargin: 24 };
+// Column specs the acceptance check measures against (section 10).
+const COLS = { assignee: 150, status: 130, statusIconOnly: 48, execute: 32, bug: 60, gutter: 8 };
+
+// Built-in execution statuses: the 12-value vocabulary in design-context/mock-data.md, applied to test instances.
+// Icons are Lucide stand-ins for the Figma Status component glyphs described there (the component is the source of truth).
+const STATUSES = {
+  'passed':      { label: 'Passed',      icon: 'circle-check',    color: 'success' },
+  'failed':      { label: 'Failed',      icon: 'circle-x',        color: 'danger' },
+  'running':     { label: 'Running',     icon: 'loader-circle',   color: 'accent' },   // static, no spin
+  'queued':      { label: 'Queued',      icon: 'circle-ellipsis', color: 'done' },
+  'archived':    { label: 'Archived',    icon: 'archive',         color: 'muted' },
+  'stopped':     { label: 'Stopped',     icon: 'circle-stop',     color: 'danger' },
+  'completed':   { label: 'Completed',   icon: 'circle-check',    color: 'muted' },
+  'deleted':     { label: 'Deleted',     icon: 'trash-2',         color: 'muted' },
+  'muted':       { label: 'Muted',       icon: 'volume-x',        color: 'muted' },
+  'warning':     { label: 'Warning',     icon: 'triangle-alert',  color: 'attention' },
+  'not started': { label: 'Not Started', icon: 'circle-dashed',   color: 'muted' },
+  'skipped':     { label: 'Skipped',     icon: 'skip-forward',    color: 'muted' },
+};
+// Every custom status shares one icon and a neutral colour. A row's status is a key above, or 'custom:<name>'.
+const CUSTOM_STATUS = { icon: 'circle-dot-dashed', color: 'muted' };
+const CUSTOM_STATUSES = ['Needs Retest', 'Awaiting Environment Fix From Platform Team QA', 'Blocked'];
+
+// Assignee picker stub. Names from the mock-data.md cast.
+const ASSIGNEE_OPTIONS = ['Ritika Sharma', 'Darth Vader', 'Gabbar Singh', 'Kokushibo', 'Mahendra Damodardas Baahubali'];
+
+// The 8 rows from the brief (section 7), in order. tcType: 'manual' | 'automated'. config: null or { kind, os, osVersion, browser, device }.
+const ROWS = [
+  { tcId: '#TC-8365', version: 'v5', tcType: 'manual', title: 'Test the login functionality with valid credentials to ensure that users can successfully authenticate.',
+    tags: [], assignee: 'Mahendra Damodardas Baahubali Venkataraghavan', status: 'not started', config: null, linkedIssues: 0 },
+  { tcId: '#TC-8366', version: 'v5', tcType: 'automated', title: 'Create and verify a license from a standard offer for a person user',
+    tags: ['AI Generated', 'positive'], assignee: 'Darth Vader', status: 'custom:Awaiting Environment Fix From Platform Team QA',
+    config: { kind: 'Virtual', os: 'Android', osVersion: '13.0', browser: 'Chrome', device: 'Galaxy Z Fold4' }, linkedIssues: 2 },
+  // The brief asks for a 120+ character UNBROKEN string. Browsers may break a line after "/" and "-", so the brief's URL alone
+  // has a longest unbreakable run of about 72 characters (the query string). The &sig= token extends that run to about 140
+  // characters (1044 px of min-content at 14 px semibold), so the current layout overflows at every width in scope.
+  { tcId: '#TC-8394', version: 'v2', tcType: 'manual', title: 'Verify deep link https://app.lambdatest.example/projects/web-automation-functional-testing/test-cases/TC-8394?tab=history&panel=configuration&source=notification_email_digest&sig=b7f3e9c1d2a4f6e8b0c9d7a5e3f1b2c4d6e8f0a1b3c5d7e9f2a4c6e8b0d2f4a6c8 opens the correct tab',
+    tags: [], assignee: null, status: 'failed', config: null, linkedIssues: 0 },
+  { tcId: '#TC-8395', version: 'v1', tcType: 'manual', title: 'wdwdqwDEWQD',
+    tags: [], assignee: null, status: 'not started', config: null, linkedIssues: 0 },
+  { tcId: '#TC-8401', version: 'v3', tcType: 'automated', title: 'Validate that a bulk upload of five hundred records shows a progress indicator, lists every rejected row with a reason, and ends with a summary count of imported rows',
+    tags: ['regression', 'smoke'], assignee: 'Ritika Sharma', status: 'passed',
+    config: { kind: 'Real', os: 'iOS', osVersion: '17.4', browser: 'Safari', device: 'iPhone 15 Pro' }, linkedIssues: 1 },
+  { tcId: '#TC-8402', version: 'v1', tcType: 'manual', title: 'Blocked payment flow when the gateway sandbox is down',
+    tags: [], assignee: 'Gabbar Singh', status: 'custom:Blocked',
+    config: { kind: 'Real', os: 'Android', osVersion: '14.0', browser: 'Chrome', device: 'Galaxy S24' }, linkedIssues: 0 },
+  { tcId: '#TC-8403', version: 'v1', tcType: 'automated', title: 'Skip legacy export',
+    tags: [], assignee: null, status: 'custom:Needs Retest', config: null, linkedIssues: 0 },
+  { tcId: '#TC-8404', version: 'v2', tcType: 'automated', title: 'In progress row for visual check',
+    tags: [], assignee: 'Oppenheimer', status: 'running',
+    config: { kind: 'Virtual', os: 'iOS', osVersion: '17.0', browser: 'Safari', device: 'iPhone 14' }, linkedIssues: 0 },
+];
+
+/* =====================================================================
+   STATE (demo controls). Nothing is persisted.
+   ===================================================================== */
+const state = { view: 'proposed', width: 1280, folderOpen: true, statusLabel: 'label', avatar: false, bugMode: 'hover', pinHover: false, selected: new Set() };
+
+/* ===================================================================== helpers */
+const $ = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const icon = (name, cls = '') => `<i data-lucide="${name}"${cls ? ` class="${cls}"` : ''}></i>`;
+
+function statusInfo(status) {
+  if (status.startsWith('custom:')) return { key: status, label: status.slice(7), icon: CUSTOM_STATUS.icon, color: CUSTOM_STATUS.color, custom: true };
+  return { key: status, ...STATUSES[status], custom: false };
+}
+// Initials per mock-data.md: two words = first letters; three or more = first + last; single word = one letter.
+function initials(name) {
+  const w = name.trim().split(/\s+/);
+  return (w.length === 1 ? w[0][0] : w[0][0] + w[w.length - 1][0]).toUpperCase();
+}
+function executeTip(row) {
+  if (!row.config) return 'Add a configuration to run this.';
+  return row.tcType === 'automated' ? `Run again on ${row.config.device}` : `Start manual session on ${row.config.device}`;
+}
+
+/* ===================================================================== rendering */
+function renderMeta(row) {
+  const parts = [`<span>${esc(row.tcId)}</span>`, `<span class="sep">·</span>`, `<span>${esc(row.version)}</span>`, `<span class="sep">·</span>`];
+  if (!row.config) {
+    parts.push(`<button type="button" class="link-attention" data-action="add-config">${icon('triangle-alert')}No Configuration added</button>`);
+  } else {
+    const c = row.config;
+    parts.push(`<span>${esc(c.kind)}</span>`, `<span class="sep">·</span>`,
+      `<span class="cfg" title="${esc(c.os)} ${esc(c.osVersion)}">${icon('layers')} ${esc(c.osVersion)}</span>`, `<span class="sep">·</span>`,
+      `<span class="cfg" title="${esc(c.browser)}">${icon('globe')}</span>`, `<span class="sep">·</span>`,
+      `<span class="cfg">${icon('smartphone')} ${esc(c.device)}</span>`);
+  }
+  return `<div class="meta">${parts.join('')}</div>`;
+}
+
+function renderAssignee(row, i) {
+  const current = state.view === 'current';
+  let inner;
+  if (row.assignee) {
+    const avatar = (current || state.avatar) ? `<span class="avatar" aria-hidden="true">${initials(row.assignee)}</span>` : '';
+    inner = `${avatar}<span class="txt">${esc(row.assignee)}</span>`;
+  } else {
+    inner = current ? `<span class="txt muted">Select Assignee</span>` : `${icon('user', 'ico')}<span class="txt muted">Unassigned</span>`;
+  }
+  return `<div class="col col-assignee"><button type="button" class="picker picker-assignee" data-menu="assignee" data-row="${i}" aria-haspopup="menu" aria-label="Assignee: ${esc(row.assignee || 'Unassigned')}">${inner}${icon('chevron-down', 'caret')}</button></div>`;
+}
+
+function renderStatus(row, i) {
+  const s = statusInfo(row.status);
+  const iconOnly = state.view === 'proposed' && state.statusLabel === 'icon';
+  const label = iconOnly ? '' : `<span class="txt">${esc(s.label)}</span>`;
+  return `<div class="col col-status"><button type="button" class="picker picker-status" data-menu="status" data-row="${i}" aria-haspopup="menu" aria-label="Status: ${esc(s.label)}"${iconOnly ? ` data-tip="${esc(s.label)}"` : ''}>${icon(s.icon, `status-ico color-${s.color}`)}${label}${icon('chevron-down', 'caret')}</button></div>`;
+}
+
+function renderBugActions(row, i, floating) {
+  const badge = row.linkedIssues ? `<span class="badge" aria-label="${row.linkedIssues} linked issues">${row.linkedIssues}</span>` : '';
+  return `<div class="bug-actions split${floating ? ' floating' : ''}">
+    <button type="button" class="icon-btn" data-action="raise-bug" data-row="${i}" aria-label="Raise bug" data-tip="Raise bug">${icon('bug')}${badge}</button>
+    <button type="button" class="icon-btn caret-btn" data-menu="bug" data-row="${i}" aria-haspopup="menu" aria-label="More bug actions">${icon('chevron-down')}</button>
+  </div>`;
+}
+
+function renderExecute(row, i) {
+  const tip = executeTip(row);
+  const enabled = !!row.config;
+  return `<div class="col col-execute"><button type="button" class="icon-btn${enabled ? ' primary' : ''}"${enabled ? '' : ' aria-disabled="true"'} data-action="execute" data-row="${i}" aria-label="${esc(tip)}" data-tip="${esc(tip)}">${icon('play')}</button></div>`;
+}
+
+function renderRow(row, i) {
+  const s = statusInfo(row.status);
+  const current = state.view === 'current';
+  const bugFirstLine = current || state.bugMode === 'first';
+  const tags = row.tags.length ? `<div class="tags">${row.tags.map((t) => `<span class="tag">${esc(t)}</span>`).join('')}</div>` : '';
+  return `<div class="ti-row${state.selected.has(i) ? ' is-selected' : ''}" data-index="${i + 1}">
+    <label class="row-check"><input type="checkbox" data-select="${i}" aria-label="Select ${esc(row.tcId)}"${state.selected.has(i) ? ' checked' : ''}></label>
+    <span class="lead-status color-${s.color}" aria-hidden="true">${icon(s.icon)}</span>
+    <div class="title-block">
+      <div class="title">${esc(row.title)}</div>
+      ${tags}
+      ${renderMeta(row)}
+    </div>
+    ${renderAssignee(row, i)}
+    ${renderStatus(row, i)}
+    ${bugFirstLine ? `<div class="col col-bug">${renderBugActions(row, i, false)}</div>` : ''}
+    ${renderExecute(row, i)}
+    ${bugFirstLine ? '' : renderBugActions(row, i, true)}
+  </div>`;
+}
+
+function render() {
+  closeMenu();
+  const body = document.body;
+  body.classList.toggle('view-current', state.view === 'current');
+  body.classList.toggle('view-proposed', state.view === 'proposed');
+  body.classList.toggle('icon-only', state.statusLabel === 'icon');
+  body.classList.toggle('bug-hover', state.bugMode === 'hover');
+  body.classList.toggle('bug-first', state.bugMode === 'first');
+  body.classList.toggle('pin-hover', state.pinHover);
+  const screen = $('#screen');
+  screen.style.width = state.width + 'px';
+  screen.classList.toggle('folder-closed', !state.folderOpen);
+  $('#list').innerHTML = ROWS.map(renderRow).join('');
+  // control bar state
+  $$('[data-ctl]').forEach((b) => b.setAttribute('aria-pressed', String(String(state[b.dataset.ctl]) === b.dataset.val)));
+  $$('[data-switch]').forEach((b) => b.setAttribute('aria-checked', String(!!state[b.dataset.switch])));
+  $('#folder-state').textContent = state.folderOpen ? 'Open' : 'Closed';
+  $('#select-all').checked = state.selected.size === ROWS.length;
+  $('#select-all').indeterminate = state.selected.size > 0 && state.selected.size < ROWS.length;
+  lucide.createIcons();
+  runChecks();
+}
+
+/* ===================================================================== acceptance checks (brief section 10) */
+function runChecks() {
+  const list = $('#list');
+  const rows = $$('.ti-row', list);
+  const failures = [];
+  rows.forEach((r, i) => { if (r.scrollWidth > r.clientWidth) failures.push(`row ${i + 1}`); });
+  if (!failures.length && list.scrollWidth > list.clientWidth) failures.push('list');
+  if (!failures.length && state.view === 'proposed') {
+    const specs = [['.col-assignee', COLS.assignee], ['.col-status', state.statusLabel === 'icon' ? COLS.statusIconOnly : COLS.status], ['.col-execute', COLS.execute]];
+    if (state.bugMode === 'first') specs.push(['.col-bug', COLS.bug]);
+    rows.forEach((r, i) => {
+      for (const [sel, expected] of specs) {
+        const w = $(sel, r).getBoundingClientRect().width;
+        if (Math.abs(w - expected) > 1) failures.push(`row ${i + 1} (${sel.slice(5)} ${w.toFixed(1)} px, spec ${expected})`);
+      }
+    });
+  }
+  const pill = $('#check-pill');
+  const ok = failures.length === 0;
+  pill.className = 'pill ' + (ok ? 'pass' : 'fail');
+  pill.textContent = ok ? 'PASS' : `FAIL: ${failures[0]}`;
+  pill.title = ok ? 'List, rows and column widths within spec' : failures.join(' · ');
+  const titleBlock = $('.ti-row .title-block', list);
+  const info = { screenWidth: state.width, folderPanel: state.folderOpen ? 'open' : 'closed', listContentWidth: list.clientWidth, titleBlockWidthRow1: titleBlock ? Math.round(titleBlock.getBoundingClientRect().width) : null, view: state.view, check: pill.textContent };
+  console.table([info]);
+  window.__ti.lastCheck = { ok, failures, ...info };
+  return window.__ti.lastCheck;
+}
+
+/* ===================================================================== menus, tooltips, toasts */
+let menuEl = null, menuAnchor = null;
+function closeMenu(returnFocus = false) {
+  if (!menuEl) return;
+  menuEl.remove(); menuEl = null;
+  if (returnFocus && menuAnchor && document.contains(menuAnchor)) menuAnchor.focus();
+  menuAnchor = null;
+}
+function openMenu(anchor, items) {
+  closeMenu();
+  menuAnchor = anchor;
+  const el = document.createElement('div');
+  el.className = 'menu'; el.setAttribute('role', 'menu');
+  el.innerHTML = items.map((it, idx) => it.group ? `<div class="group-title">${esc(it.group)}</div>` :
+    `<button type="button" role="menuitem" data-idx="${idx}">${it.icon ? icon(it.icon, `status-ico color-${it.color || 'muted'}`) : ''}<span class="lbl">${esc(it.label)}</span>${it.selected ? icon('check', 'check') : ''}</button>`).join('');
+  document.body.appendChild(el);
+  el.style.maxHeight = (window.innerHeight - 16) + 'px';
+  el.style.overflowY = 'auto';
+  const r = anchor.getBoundingClientRect();
+  el.style.left = Math.max(8, Math.min(r.left, window.innerWidth - el.offsetWidth - 8)) + 'px';
+  const h = el.offsetHeight;
+  let top = r.bottom + 4;
+  if (top + h > window.innerHeight - 8) top = r.top - h - 4;   // open upward if it does not fit below
+  if (top < 8) top = Math.max(8, window.innerHeight - h - 8);  // still off-screen: pin inside the viewport
+  el.style.top = top + 'px';
+  el.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-idx]'); if (!b) return;
+    const it = items[Number(b.dataset.idx)];
+    closeMenu(true); it.onPick();
+  });
+  el.addEventListener('keydown', (e) => {
+    const btns = $$('button', el); const cur = btns.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown') { e.preventDefault(); btns[(cur + 1) % btns.length].focus(); }
+    if (e.key === 'ArrowUp') { e.preventDefault(); btns[(cur - 1 + btns.length) % btns.length].focus(); }
+  });
+  lucide.createIcons({ root: el });
+  menuEl = el;
+  const first = $('button', el); if (first) first.focus();
+}
+document.addEventListener('mousedown', (e) => { if (menuEl && !menuEl.contains(e.target) && e.target !== menuAnchor && !menuAnchor.contains(e.target)) closeMenu(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeMenu(true); hideTip(); } });
+
+const tipEl = $('#tooltip');
+function showTip(anchor, text) {
+  tipEl.textContent = text; tipEl.classList.add('show');
+  const r = anchor.getBoundingClientRect();
+  const w = tipEl.offsetWidth, h = tipEl.offsetHeight;
+  let left = r.left + r.width / 2 - w / 2; left = Math.max(8, Math.min(left, window.innerWidth - w - 8));
+  let top = r.bottom + 6; if (top + h > window.innerHeight - 8) top = r.top - h - 6;
+  tipEl.style.left = left + 'px'; tipEl.style.top = top + 'px';
+}
+function hideTip() { tipEl.classList.remove('show'); }
+function tipTextFor(el) {
+  if (el.dataset.tip) return el.dataset.tip;
+  if (el.classList.contains('picker')) {
+    const txt = $('.txt', el);
+    if (txt && txt.scrollWidth > txt.clientWidth) return txt.textContent;
+  }
+  return null;
+}
+function tipTarget(e) { return e.target.closest('[data-tip], .picker'); }
+document.addEventListener('mouseover', (e) => { const t = tipTarget(e); if (!t) return; const text = tipTextFor(t); if (text) showTip(t, text); });
+document.addEventListener('mouseout', (e) => { if (tipTarget(e)) hideTip(); });
+document.addEventListener('focusin', (e) => { const t = tipTarget(e); if (!t) return; const text = tipTextFor(t); if (text) showTip(t, text); });
+document.addEventListener('focusout', (e) => { if (tipTarget(e)) hideTip(); });
+
+function toast(msg) {
+  const el = document.createElement('div'); el.className = 'toast'; el.textContent = msg;
+  $('#toasts').appendChild(el); setTimeout(() => el.remove(), 4000);
+}
+
+/* ===================================================================== events */
+$('#controls').addEventListener('click', (e) => {
+  const seg = e.target.closest('[data-ctl]');
+  if (seg) { const k = seg.dataset.ctl, v = seg.dataset.val; state[k] = k === 'width' ? Number(v) : k === 'avatar' ? v === 'true' : v; render(); return; }
+  const sw = e.target.closest('[data-switch]');
+  if (sw) { state[sw.dataset.switch] = !state[sw.dataset.switch]; render(); }
+});
+
+$('#select-all').addEventListener('change', (e) => { state.selected = new Set(e.target.checked ? ROWS.map((_, i) => i) : []); render(); });
+
+$('#list').addEventListener('change', (e) => {
+  const cb = e.target.closest('input[data-select]'); if (!cb) return;
+  const i = Number(cb.dataset.select);
+  if (cb.checked) state.selected.add(i); else state.selected.delete(i);
+  cb.closest('.ti-row').classList.toggle('is-selected', cb.checked);
+  $('#select-all').checked = state.selected.size === ROWS.length;
+  $('#select-all').indeterminate = state.selected.size > 0 && state.selected.size < ROWS.length;
+});
+
+$('#list').addEventListener('click', (e) => {
+  const btn = e.target.closest('button'); if (!btn) return;
+  const i = Number(btn.dataset.row); const row = ROWS[i];
+  if (btn.dataset.action === 'add-config') { toast('Add configuration flow would open here'); return; }
+  if (btn.dataset.action === 'execute') { if (btn.getAttribute('aria-disabled') === 'true') return; toast('Execution would start here'); return; }
+  if (btn.dataset.action === 'raise-bug') { toast('Raise bug flow would open here'); return; }
+  if (btn.dataset.menu === 'assignee') {
+    openMenu(btn, ASSIGNEE_OPTIONS.map((name) => ({ label: name, selected: row.assignee === name, onPick: () => { row.assignee = name; render(); focusPicker(i, 'assignee'); } })));
+  }
+  if (btn.dataset.menu === 'status') {
+    const items = [{ group: 'Built-in' }];
+    for (const key of Object.keys(STATUSES)) { const s = statusInfo(key); items.push({ label: s.label, icon: s.icon, color: s.color, selected: row.status === key, onPick: () => { row.status = key; render(); focusPicker(i, 'status'); } }); }
+    items.push({ group: 'Custom' });
+    for (const name of CUSTOM_STATUSES) { const key = 'custom:' + name; items.push({ label: name, icon: CUSTOM_STATUS.icon, color: CUSTOM_STATUS.color, selected: row.status === key, onPick: () => { row.status = key; render(); focusPicker(i, 'status'); } }); }
+    openMenu(btn, items);
+  }
+  if (btn.dataset.menu === 'bug') {
+    openMenu(btn, ['Raise bug', 'Link issue', 'View issues'].map((label) => ({ label, onPick: () => toast(`${label} would open here`) })));
+  }
+});
+function focusPicker(i, which) { const b = $(`.ti-row[data-index="${i + 1}"] .picker-${which}`); if (b) b.focus(); }
+
+function layoutChrome() {
+  const h = $('#controls').offsetHeight;
+  document.body.style.paddingTop = h + 'px';
+  $('#toasts').style.top = (h + 16) + 'px';
+}
+window.addEventListener('resize', () => { layoutChrome(); runChecks(); });
+
+window.__ti = { state, render, runChecks, ROWS, STATUSES, LAYOUT, COLS, lastCheck: null };
+layoutChrome();
+render();
+</script>
+</body>
+</html>
